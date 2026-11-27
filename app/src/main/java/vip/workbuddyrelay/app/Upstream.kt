@@ -69,47 +69,78 @@ object Upstream {
         return try{request()}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);request()}
     }
     /**
-     * 模型目录路径按区域区分：国内版 personal/models；
-     * 国际版是 /console/enterprises/{enterpriseId}/config/models，旧的
-     * personal/models 在国际域会直接返回 HTTP 500。
+     * 模型目录端点。两个区域都用 /v3/config（同域返回 200），
+     * 旧的 /console/enterprises/personal/models 只有国内域存在，国际域直接 500。
      */
-    fun modelsPath(acc:Account):String {
-        if(!acc.global)return "/console/enterprises/personal/models"
-        val enterprise=acc.enterpriseId.ifBlank{"personal"}
-        return "/console/enterprises/$enterprise/config/models"
-    }
+    fun modelsPaths(acc:Account):List<String> = listOf("/v3/config")
+    fun modelsPath(acc:Account):String = "/v3/config"
     fun models():JSONArray {
         var a=ready()
-        fun fetch(acc:Account):JSONObject = root(base(acc)+modelsPath(acc),"GET",headers(acc))
-        val d=try{fetch(a)}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);fetch(a)}
-        val (all,agents)=parseCatalog(d)
-        val ids=mutableListOf<String>()
-        for(i in 0 until agents.length()){val agent=agents.optJSONObject(i)?:continue;if(agent.str("name")=="cli"){val ms=agent.optJSONArray("models")?:JSONArray();for(j in 0 until ms.length())ms.optString(j).takeIf{it.isNotBlank()}?.let{ids.add(it)};break}}
-        // 国际版目录不一定带 agents，此时退回全部可见且支持 chat 的模型。
-        if(ids.isEmpty()){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue;if(m.optBoolean("disabled"))continue;val tags=m.optJSONArray("tags")?:JSONArray();val chat=tags.length()==0||(0 until tags.length()).any{tags.optString(it)=="chat"};if(chat&&m.str("id").isNotBlank())ids.add(m.str("id"))}}
-        val out=JSONArray();for(id in ids){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue;if(m.str("id")==id&&!m.optBoolean("disabled")){val item=JSONObject().put("id",id).put("object","model").put("owned_by","workbuddy").put("created",0).put("name",m.str("name")).put("context_window",m.optLong("maxInputTokens")).put("max_output_tokens",m.optLong("maxOutputTokens")).put("supported_efforts",m.optJSONObject("reasoning")?.optJSONArray("supportedEfforts")?:JSONArray());for(k in listOf("multiplier","rate","倍率","inputMultiplier","outputMultiplier"))if(m.has(k)&&!m.isNull(k))item.put(k,m.get(k));out.put(item);break}}}
-        if(out.length()==0)throw RelayError(502,"上游没有可用的 cli 模型")
-        Store.saveModels(a,out);return out
+        val body=try{root(base(a)+modelsPath(a),"GET",configHeaders(a))}
+        catch(e:RelayError){
+            if(e.status!=401)throw e
+            a=ready(true)
+            root(base(a)+modelsPath(a),"GET",configHeaders(a))
+        }
+        val out=extractModels(body)
+        if(out.length()==0){
+            val raw=body.toString()
+            Logs.add("模型诊断：/v3/config 未解析出模型（${raw.length}B；data.models=" +
+                (body.optJSONObject("data")?.opt("models")?.let{it.javaClass.simpleName}?:"null") + "）")
+            val manual=Store.manualFor(a)
+            if(manual.isNotEmpty()){Logs.add("使用手动配置的 ${manual.size} 个模型");return Store.modelsFor(a)}
+            throw RelayError(502,"该账号目录没有返回模型。可在「手动添加模型」里填写模型 ID。")
+        }
+        Store.saveModels(a,out)
+        Logs.add("模型目录(/v3/config)：${out.length()} 个")
+        return out
+    }
+    /** /v3/config 的返回按渠道区分，用 CLI 渠道身份读取 cli 名单。 */
+    private fun configHeaders(a:Account)=headers(a).apply{
+        put("User-Agent","CLI/2.63.2 CodeBuddy/2.63.2")
+        put("Accept","application/json")
     }
     /**
-     * 兼容两种目录结构：
-     *  - 国内版 `{data:{models:[…],agents:[…]}}`
-     *  - 国际版 `{data:[{id,tags…}]}`（data 本身是数组，agents 单独给出）
+     * 解析 /v3/config：
+     *  data.models 是模型数组，data.agent.agents（或 data.agents）里有 name=cli 的名单；
+     *  每个模型的 credits 是形如 "x0.79" 的字符串，倍率由此而来。
      */
-    fun parseCatalog(d:JSONObject):Pair<JSONArray,JSONArray> {
-        val data=d.opt("data")
-        val container=d.optJSONObject("data")
-        val all=when{
-            data is JSONArray->data
-            container!=null->container.optJSONArray("models")?:d.optJSONArray("models")?:JSONArray()
-            else->d.optJSONArray("models")?:JSONArray()
+    fun extractModels(d:JSONObject):JSONArray {
+        val data=d.optJSONObject("data")?:d
+        val all=data.optJSONArray("models")?:JSONArray()
+        val agents=data.optJSONObject("agent")?.optJSONArray("agents")
+            ?:data.optJSONArray("agents")?:JSONArray()
+        val ids=mutableListOf<String>()
+        for(i in 0 until agents.length()){val agent=agents.optJSONObject(i)?:continue
+            if(agent.str("name")=="cli"){val ms=agent.optJSONArray("models")?:JSONArray()
+                for(j in 0 until ms.length())ms.optString(j).takeIf{it.isNotBlank()}?.let{ids.add(it)};break}}
+        if(ids.isEmpty()){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue
+            if(m.optBoolean("disabled"))continue
+            // 路由型模型（auto 之类）每请求解析成不同模型，不适合作为固定条目。
+            if(m.str("id").endsWith("-auto"))continue
+            if(m.str("id").isNotBlank())ids.add(m.str("id"))}}
+        val out=JSONArray()
+        for(id in ids){
+            val m=(0 until all.length()).mapNotNull{all.optJSONObject(it)}.firstOrNull{it.str("id")==id}?:continue
+            if(m.optBoolean("disabled"))continue
+            val item=JSONObject()
+                .put("id",id).put("object","model").put("owned_by","workbuddy").put("created",0)
+                .put("name",m.str("name").ifBlank{id})
+                .put("context_window",m.optLong("maxInputTokens"))
+                .put("max_output_tokens",m.optLong("maxOutputTokens"))
+                .put("supported_efforts",m.optJSONObject("reasoning")?.optJSONArray("supportedEfforts")?:JSONArray())
+            // credits 形如 "x0.79"，倍率完全由上游给出。
+            creditMultiplier(m.str("credits"))?.let{item.put("multiplier",it).put("credits",m.str("credits"))}
+            if(m.has("supportsImages"))item.put("supports_images",m.optBoolean("supportsImages"))
+            out.put(item)
         }
-        val agents=container?.optJSONArray("agents")
-            ?:d.optJSONArray("agents")
-            ?:container?.optJSONArray("agent_list")
-            ?:d.optJSONArray("agent_list")
-            ?:JSONArray()
-        return all to agents
+        return out
+    }
+    /** 从 "x0.79" 这样的上游字符串里取倍率；取不到就不写，绝不猜。 */
+    fun creditMultiplier(raw:String):Double? {
+        val m=Regex("x\\s*([0-9]*\\.?[0-9]+)",RegexOption.IGNORE_CASE).find(raw)?:return null
+        val v=m.groupValues[1].toDoubleOrNull()?:return null
+        return if(v>=0)v else null
     }
     fun chat(body:JSONObject):HttpURLConnection {
         var a=ready();var c=open(base(a)+"/v2/chat/completions","POST",headers(a),body.toString())

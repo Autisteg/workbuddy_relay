@@ -139,6 +139,7 @@ class MainActivity : Activity() {
         button("立即签到领积分") { work { val result = Upstream.checkin(); Upstream.credits(); runOnUiThread { status.text = result } } }
         button("刷新积分") { work { val value = Upstream.credits(); runOnUiThread { status.text = "当前积分：$value" } } }
         button("更新动态模型") { work { Upstream.models() } }
+        button("手动添加模型（目录为空时用）") { addManualModel() }
         button("查看模型") {
             val models = Store.modelsFor()
             AlertDialog.Builder(this).setTitle("动态模型（${models.length()}）").setMessage(
@@ -204,6 +205,34 @@ class MainActivity : Activity() {
                 refresh()
             }
             .setNegativeButton("保留", null)
+            .show()
+    }
+
+    /** 国际版等场景下上游目录为空时，允许直接填写模型 ID。 */
+    private fun addManualModel() {
+        val a = Store.active
+        if (a == null) {
+            status.text = "请先登录"
+            return
+        }
+        val current = Store.manualFor(a)
+        val input = EditText(this).apply {
+            hint = "每行一个模型 ID，例如 claude-sonnet-4.5"
+            setText(current.joinToString("\n"))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 4
+        }
+        AlertDialog.Builder(this)
+            .setTitle("手动模型（${a.regionLabel}）")
+            .setMessage("上游目录没有返回模型时，可在这里填写模型 ID，保存后会出现在 /v1/models 里。")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                val ids = input.text.toString().split('\n')
+                Store.saveManualModels(a, ids)
+                Logs.add("已保存 ${Store.manualFor(a).size} 个手动模型")
+                refresh()
+            }
+            .setNegativeButton("取消", null)
             .show()
     }
 

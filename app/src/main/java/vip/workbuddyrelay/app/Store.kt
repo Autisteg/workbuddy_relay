@@ -70,6 +70,33 @@ object Store {
     @Volatile var models = JSONObject(); private set
     @Volatile var modelsAt = 0L; private set
     @Volatile var modelsError = ""
+    /** 用户手动输入的模型 ID（上游目录为空时的兜底），按账号保存。 */
+    @Volatile var manualModels = JSONObject(); private set
+
+    /** 当前活动账号手动添加的模型 ID 列表。 */
+    fun manualFor(a: Account? = active): List<String> {
+        if (a == null) return emptyList()
+        val arr = manualModels.optJSONArray(a.key) ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+    }
+
+    @Synchronized fun saveManualModels(a: Account, ids: List<String>) {
+        val arr = JSONArray()
+        ids.map { it.trim() }.filter { it.isNotBlank() }.distinct().forEach { arr.put(it) }
+        if (arr.length() == 0) manualModels.remove(a.key) else manualModels.put(a.key, arr)
+        persistManual()
+    }
+
+    private fun loadManual() {
+        manualModels = JSONObject()
+        try {
+            manualModels = read("manual.enc")?.optJSONObject("by_account") ?: JSONObject()
+        } catch (_: Exception) { }
+    }
+
+    private fun persistManual() {
+        try { write("manual.enc", JSONObject().put("by_account", manualModels)) } catch (_: Exception) { }
+    }
     @Volatile var credits: Long? = null; private set
     @Volatile var creditsAt = 0L; private set
     @Volatile var lastCheckin = ""
@@ -94,6 +121,7 @@ object Store {
         } catch (_: Exception) { Logs.add("配置解密失败，请重新设置") }
         loadAccounts()
         loadModels()
+        loadManual()
         saveConfig()
     }
 
@@ -219,11 +247,26 @@ object Store {
         write("models.enc", JSONObject().put("by_account", models).put("at", modelsAt))
     }
 
-    /** 当前活动账号的模型；没有则回退到任意一个。 */
+    /** 当前活动账号的模型；目录结果与手动添加合并。 */
     fun modelsFor(a: Account? = active): JSONArray {
         if (a == null) return JSONArray()
-        models.optJSONArray(a.key)?.let { return it }
-        return JSONArray()
+        val merged = JSONArray()
+        val seen = mutableSetOf<String>()
+        val cached = models.optJSONArray(a.key) ?: JSONArray()
+        for (i in 0 until cached.length()) {
+            val m = cached.optJSONObject(i) ?: continue
+            val id = m.str("id")
+            if (id.isBlank() || !seen.add(id)) continue
+            merged.put(m)
+        }
+        for (id in manualFor(a)) {
+            if (!seen.add(id)) continue
+            merged.put(
+                JSONObject().put("id", id).put("object", "model").put("owned_by", "workbuddy")
+                    .put("created", 0).put("name", id).put("manual", true)
+            )
+        }
+        return merged
     }
 
     @Synchronized fun saveCredits(a: Account, remain: Long) {

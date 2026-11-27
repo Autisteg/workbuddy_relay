@@ -4,6 +4,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -58,19 +59,7 @@ class AccountStoreTest {
         assertEquals("uid-9", a.displayName)
     }
 
-    @Test
-    fun cnUsesPersonalModelsPath() {
-        assertEquals("/console/enterprises/personal/models", Upstream.modelsPath(cn()))
-    }
 
-    @Test
-    fun globalUsesEnterpriseConfigModelsPath() {
-        // 国际域上 personal/models 会返回 HTTP 500，必须走 config/models。
-        val withEnterprise = gl().copy(enterpriseId = "ent-1")
-        assertEquals("/console/enterprises/ent-1/config/models", Upstream.modelsPath(withEnterprise))
-        // 没有企业 ID 时回退 personal，仍然是 config/models 而不是旧的 personal/models。
-        assertEquals("/console/enterprises/personal/config/models", Upstream.modelsPath(gl()))
-    }
 
     @Test
     fun baseUrlFollowsRegion() {
@@ -79,31 +68,58 @@ class AccountStoreTest {
     }
 
     @Test
-    fun parseCatalogHandlesArrayDataForGlobal() {
-        // 国际版：data 本身是模型数组，没有 agents。
-        val global = JSONObject(
-            """{"data":[{"id":"m1","tags":["chat"]},{"id":"m2","tags":["chat"]}],"agents":[{"name":"cli"}]}"""
+    fun extractModelsUsesCliRosterFromAgentContainer() {
+        // /v3/config 真实结构：data.models + data.agent.agents（name=cli）
+        val body = JSONObject(
+            """{"code":0,"data":{"models":[
+                 {"id":"glm-5.3","name":"GLM-5.3","maxInputTokens":1000000,"maxOutputTokens":48000,"credits":"x0.79"},
+                 {"id":"gpt-5.5","name":"GPT-5.5","maxInputTokens":400000,"maxOutputTokens":32000,"credits":"x1.2"},
+                 {"id":"hidden","name":"Hidden","maxInputTokens":1000,"maxOutputTokens":100,"disabled":true}
+               ],"agent":{"agents":[{"name":"cli","models":["glm-5.3","hidden"]}]}}}"""
         )
-        val (models, agents) = Upstream.parseCatalog(global)
-        assertEquals(2, models.length())
-        assertEquals(1, agents.length())
-        assertEquals("m1", models.getJSONObject(0).getString("id"))
+        val out = Upstream.extractModels(body)
+        assertEquals(1, out.length())
+        val m = out.getJSONObject(0)
+        assertEquals("glm-5.3", m.getString("id"))
+        assertEquals(1000000L, m.getLong("context_window"))
+        assertEquals(48000L, m.getLong("max_output_tokens"))
+        assertEquals(0.79, m.getDouble("multiplier"), 0.0001)
     }
 
     @Test
-    fun parseCatalogHandlesObjectDataForCn() {
-        val cnBody = JSONObject(
-            """{"code":0,"data":{"models":[{"id":"c1"}],"agents":[{"name":"cli","models":["c1"]}]}}"""
+    fun extractModelsFallsBackToAllModelsWithoutCliRoster() {
+        val body = JSONObject(
+            """{"code":0,"data":{"models":[
+                 {"id":"gpt-5.5","maxInputTokens":400000,"maxOutputTokens":32000,"credits":"x1.2"},
+                 {"id":"router-auto","maxInputTokens":1000,"maxOutputTokens":10}
+               ]}}"""
         )
-        val (models, agents) = Upstream.parseCatalog(cnBody)
-        assertEquals(1, models.length())
-        assertEquals("c1", agents.getJSONObject(0).getJSONArray("models").getString(0))
+        val out = Upstream.extractModels(body)
+        assertEquals(1, out.length())
+        assertEquals("gpt-5.5", out.getJSONObject(0).getString("id"))
     }
 
     @Test
-    fun parseCatalogToleratesMissingData() {
-        val (models, agents) = Upstream.parseCatalog(JSONObject("""{"code":0}"""))
-        assertEquals(0, models.length())
-        assertEquals(0, agents.length())
+    fun extractModelsOnUnauthenticatedConfigReturnsEmpty() {
+        // 未鉴权时 data.models 为 null，必须安全返回空而不是崩溃
+        val body = JSONObject("""{"code":0,"data":{"agent":{"agents":null},"models":null}}""")
+        assertEquals(0, Upstream.extractModels(body).length())
+    }
+
+    @Test
+    fun creditMultiplierParsesUpstreamCreditsString() {
+        assertEquals(0.79, Upstream.creditMultiplier("x0.79")!!, 0.0001)
+        assertEquals(1.2, Upstream.creditMultiplier("X1.2")!!, 0.0001)
+        assertEquals(0.0, Upstream.creditMultiplier("x0.00")!!, 0.0001)
+        // 没有倍率就不猜
+        assertNull(Upstream.creditMultiplier(""))
+        assertNull(Upstream.creditMultiplier("free"))
+    }
+
+    @Test
+    fun modelsPathIsV3ConfigForBothRegions() {
+        // 旧的 personal/models 在国际域返回 500，两个区域都改用 /v3/config
+        assertEquals("/v3/config", Upstream.modelsPath(cn()))
+        assertEquals("/v3/config", Upstream.modelsPath(gl()))
     }
 }

@@ -12,8 +12,8 @@ android {
         minSdk = 26
         targetSdk = 34
         testInstrumentationRunner = "vip.workbuddyrelay.app.SmokeInstrumentation"
-        versionCode = 5
-        versionName = "0.2.2"
+        versionCode = 11
+        versionName = "0.3.1"
     }
 
     signingConfigs {
