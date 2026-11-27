@@ -24,14 +24,20 @@ object Upstream {
         headers.forEach{(k,v)->c.setRequestProperty(k,v)};c.setRequestProperty("Accept-Encoding","identity")
         try{if(body!=null){c.doOutput=true;val bytes=body.toByteArray(Charsets.UTF_8);c.setFixedLengthStreamingMode(bytes.size);c.outputStream.use{it.write(bytes)}};return c}catch(e:Exception){c.disconnect();throw e}
     }
-    fun envelope(url:String,method:String,headers:Map<String,String>,body:String?=null):JSONObject {
+    /** 读取完整响应体并做统一的错误检查；不假设 data 的形状。 */
+    fun root(url:String,method:String,headers:Map<String,String>,body:String?=null):JSONObject {
         val c=open(url,method,headers,body)
         try {val status=c.responseCode
             if(status !in 200..299)throw RelayError(if(status in listOf(401,403,402,429))status else 502,"上游 HTTP $status")
-            val text=c.inputStream.bufferedReader().use{it.readText()};val root=JSONObject(text)
-            if(root.optInt("code",-1)!=0)throw RelayError(502,"上游业务错误 ${root.optInt("code")}","business_error")
-            return root.optJSONObject("data")?:throw RelayError(502,"上游响应缺少 data")
+            val text=c.inputStream.bufferedReader().use{it.readText()}
+            val parsed=try{JSONObject(text)}catch(_:Exception){throw RelayError(502,"上游响应不是 JSON 对象")}
+            // 有些端点（国际版模型目录）没有 code 字段，只在存在时才校验。
+            if(parsed.has("code")){val code=parsed.optInt("code",0);if(code!=0)throw RelayError(502,"上游业务错误 $code","business_error")}
+            return parsed
         }finally{c.disconnect()}
+    }
+    fun envelope(url:String,method:String,headers:Map<String,String>,body:String?=null):JSONObject {
+        return root(url,method,headers,body).optJSONObject("data")?:throw RelayError(502,"上游响应缺少 data")
     }
     @Synchronized fun ready(force:Boolean=false):Account {
         val a=Store.active?:throw RelayError(401,"请先在 WorkBuddy Relay 中登录","login_required")
@@ -74,17 +80,37 @@ object Upstream {
     }
     fun models():JSONArray {
         var a=ready()
-        fun fetch(acc:Account):JSONObject = envelope(base(acc)+modelsPath(acc),"GET",headers(acc))
+        fun fetch(acc:Account):JSONObject = root(base(acc)+modelsPath(acc),"GET",headers(acc))
         val d=try{fetch(a)}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);fetch(a)}
-        val all=modelList(d);val agents=agentList(d);val ids=mutableListOf<String>()
+        val (all,agents)=parseCatalog(d)
+        val ids=mutableListOf<String>()
         for(i in 0 until agents.length()){val agent=agents.optJSONObject(i)?:continue;if(agent.str("name")=="cli"){val ms=agent.optJSONArray("models")?:JSONArray();for(j in 0 until ms.length())ms.optString(j).takeIf{it.isNotBlank()}?.let{ids.add(it)};break}}
+        // 国际版目录不一定带 agents，此时退回全部可见且支持 chat 的模型。
+        if(ids.isEmpty()){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue;if(m.optBoolean("disabled"))continue;val tags=m.optJSONArray("tags")?:JSONArray();val chat=tags.length()==0||(0 until tags.length()).any{tags.optString(it)=="chat"};if(chat&&m.str("id").isNotBlank())ids.add(m.str("id"))}}
         val out=JSONArray();for(id in ids){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue;if(m.str("id")==id&&!m.optBoolean("disabled")){val item=JSONObject().put("id",id).put("object","model").put("owned_by","workbuddy").put("created",0).put("name",m.str("name")).put("context_window",m.optLong("maxInputTokens")).put("max_output_tokens",m.optLong("maxOutputTokens")).put("supported_efforts",m.optJSONObject("reasoning")?.optJSONArray("supportedEfforts")?:JSONArray());for(k in listOf("multiplier","rate","倍率","inputMultiplier","outputMultiplier"))if(m.has(k)&&!m.isNull(k))item.put(k,m.get(k));out.put(item);break}}}
         if(out.length()==0)throw RelayError(502,"上游没有可用的 cli 模型")
         Store.saveModels(a,out);return out
     }
-    /** 国际版返回 data.data，国内版返回 data.models。 */
-    private fun modelList(d:JSONObject):JSONArray = d.optJSONArray("models")?:d.optJSONArray("data")?:JSONArray()
-    private fun agentList(d:JSONObject):JSONArray = d.optJSONArray("agents")?:d.optJSONArray("agent_list")?:JSONArray()
+    /**
+     * 兼容两种目录结构：
+     *  - 国内版 `{data:{models:[…],agents:[…]}}`
+     *  - 国际版 `{data:[{id,tags…}]}`（data 本身是数组，agents 单独给出）
+     */
+    fun parseCatalog(d:JSONObject):Pair<JSONArray,JSONArray> {
+        val data=d.opt("data")
+        val container=d.optJSONObject("data")
+        val all=when{
+            data is JSONArray->data
+            container!=null->container.optJSONArray("models")?:d.optJSONArray("models")?:JSONArray()
+            else->d.optJSONArray("models")?:JSONArray()
+        }
+        val agents=container?.optJSONArray("agents")
+            ?:d.optJSONArray("agents")
+            ?:container?.optJSONArray("agent_list")
+            ?:d.optJSONArray("agent_list")
+            ?:JSONArray()
+        return all to agents
+    }
     fun chat(body:JSONObject):HttpURLConnection {
         var a=ready();var c=open(base(a)+"/v2/chat/completions","POST",headers(a),body.toString())
         if(c.responseCode==401){c.disconnect();a=ready(true);c=open(base(a)+"/v2/chat/completions","POST",headers(a),body.toString())}

@@ -1,4 +1,4 @@
-# WorkBuddy Relay Android 0.2.1
+# WorkBuddy Relay Android 0.2.2
 
 > 本项目由 AI 辅助（vibe coding）完成：需求由用户提出，代码、协议核对、构建与验证由 AI 智能体在其手机上直接完成。请把它当作实验性工具，而非生产级软件。
 

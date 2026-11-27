@@ -77,4 +77,33 @@ class AccountStoreTest {
         assertEquals(Upstream.CN, Upstream.base(cn()))
         assertEquals(Upstream.GLOBAL, Upstream.base(gl()))
     }
+
+    @Test
+    fun parseCatalogHandlesArrayDataForGlobal() {
+        // 国际版：data 本身是模型数组，没有 agents。
+        val global = JSONObject(
+            """{"data":[{"id":"m1","tags":["chat"]},{"id":"m2","tags":["chat"]}],"agents":[{"name":"cli"}]}"""
+        )
+        val (models, agents) = Upstream.parseCatalog(global)
+        assertEquals(2, models.length())
+        assertEquals(1, agents.length())
+        assertEquals("m1", models.getJSONObject(0).getString("id"))
+    }
+
+    @Test
+    fun parseCatalogHandlesObjectDataForCn() {
+        val cnBody = JSONObject(
+            """{"code":0,"data":{"models":[{"id":"c1"}],"agents":[{"name":"cli","models":["c1"]}]}}"""
+        )
+        val (models, agents) = Upstream.parseCatalog(cnBody)
+        assertEquals(1, models.length())
+        assertEquals("c1", agents.getJSONObject(0).getJSONArray("models").getString(0))
+    }
+
+    @Test
+    fun parseCatalogToleratesMissingData() {
+        val (models, agents) = Upstream.parseCatalog(JSONObject("""{"code":0}"""))
+        assertEquals(0, models.length())
+        assertEquals(0, agents.length())
+    }
 }
