@@ -57,4 +57,24 @@ class AccountStoreTest {
         val a = Account("at", "rt", 0, "", "uid-9", "", "", global = false)
         assertEquals("uid-9", a.displayName)
     }
+
+    @Test
+    fun cnUsesPersonalModelsPath() {
+        assertEquals("/console/enterprises/personal/models", Upstream.modelsPath(cn()))
+    }
+
+    @Test
+    fun globalUsesEnterpriseConfigModelsPath() {
+        // 国际域上 personal/models 会返回 HTTP 500，必须走 config/models。
+        val withEnterprise = gl().copy(enterpriseId = "ent-1")
+        assertEquals("/console/enterprises/ent-1/config/models", Upstream.modelsPath(withEnterprise))
+        // 没有企业 ID 时回退 personal，仍然是 config/models 而不是旧的 personal/models。
+        assertEquals("/console/enterprises/personal/config/models", Upstream.modelsPath(gl()))
+    }
+
+    @Test
+    fun baseUrlFollowsRegion() {
+        assertEquals(Upstream.CN, Upstream.base(cn()))
+        assertEquals(Upstream.GLOBAL, Upstream.base(gl()))
+    }
 }

@@ -27,6 +27,26 @@ class MainActivity : Activity() {
     @Volatile private var destroyed = false
     private var polling = false
 
+    /** 程序化设置开关时不要触发切换回调。 */
+    private var suppressToggle = false
+
+    /** 按区域切换当前账号；该区域没有账号时提示先登录。 */
+    private fun switchRegion(globalRegion: Boolean) {
+        val target = Store.accounts.firstOrNull { it.global == globalRegion }
+        if (target == null) {
+            val region = if (globalRegion) "国际版" else "国内版"
+            Logs.add("尚未登录$region 账号，请先完成授权")
+            refresh()
+            return
+        }
+        if (target.key != Store.active?.key) {
+            Store.setActive(target)
+            Logs.add("已切换到 ${target.regionLabel} 账号：${target.displayName}")
+        }
+        refresh()
+        work { Upstream.models() }
+    }
+
     private val poll = object : Runnable {
         override fun run() {
             if (destroyed || !polling) return
@@ -74,11 +94,18 @@ class MainActivity : Activity() {
         accountsView = text("", 13f)
         button("管理账号（切换 / 删除）") { manageAccounts() }
 
-        global = Switch(this).apply { text = "本次授权使用国际版 workbuddy.ai（关闭为国内版）" }
+        global = Switch(this).apply {
+            text = "国际版 workbuddy.ai（关闭为国内版）"
+            setOnCheckedChangeListener { _, checked ->
+                if (suppressToggle) return@setOnCheckedChangeListener
+                switchRegion(checked)
+            }
+        }
         panel.addView(global)
         button("创建设备授权链接") {
             polling = false
             handler.removeCallbacks(poll)
+            // 授权区域跟随开关；若该区域已有账号，仍然会另外保存为新账号而不覆盖。
             val g = global.isChecked
             work { val p = Login.start(g); runOnUiThread { showLink(p); startPolling() } }
         }
@@ -208,6 +235,12 @@ class MainActivity : Activity() {
 
     private fun refresh() {
         val a = Store.active
+        // 开关反映当前使用的账号区域；程序化同步不触发切换逻辑。
+        if (::global.isInitialized) {
+            suppressToggle = true
+            global.isChecked = a?.global ?: global.isChecked
+            suppressToggle = false
+        }
         val credit = Store.credits?.toString() ?: "未查询"
         val accountLine = when {
             a == null -> "账号：未登录"

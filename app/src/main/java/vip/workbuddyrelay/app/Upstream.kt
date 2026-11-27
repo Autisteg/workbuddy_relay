@@ -62,15 +62,29 @@ object Upstream {
         fun request():String {return try{envelope((if(a.global)GLOBAL else "https://www.codebuddy.cn")+"/v2/billing/meter/daily-checkin","POST",billingHeaders(a),"{}");Store.lastCheckin="签到成功";Logs.add("每日签到成功");"签到成功"}catch(e:RelayError){if(e.message.contains("已签到")||e.message.contains("today",true)||e.message.contains("already",true)){Store.lastCheckin="今日已签到";Logs.add("今日已签到");"今日已签到"}else throw e}}
         return try{request()}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);request()}
     }
+    /**
+     * 模型目录路径按区域区分：国内版 personal/models；
+     * 国际版是 /console/enterprises/{enterpriseId}/config/models，旧的
+     * personal/models 在国际域会直接返回 HTTP 500。
+     */
+    fun modelsPath(acc:Account):String {
+        if(!acc.global)return "/console/enterprises/personal/models"
+        val enterprise=acc.enterpriseId.ifBlank{"personal"}
+        return "/console/enterprises/$enterprise/config/models"
+    }
     fun models():JSONArray {
         var a=ready()
-        val d=try{envelope(base(a)+"/console/enterprises/personal/models","GET",headers(a))}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);envelope(base(a)+"/console/enterprises/personal/models","GET",headers(a))}
-        val all=d.optJSONArray("models")?:JSONArray();val agents=d.optJSONArray("agents")?:JSONArray();val ids=mutableListOf<String>()
-        for(i in 0 until agents.length()){val agent=agents.getJSONObject(i);if(agent.str("name")=="cli"){val ms=agent.optJSONArray("models")?:JSONArray();for(j in 0 until ms.length())ids.add(ms.getString(j));break}}
-        val out=JSONArray();for(id in ids){for(i in 0 until all.length()){val m=all.getJSONObject(i);if(m.str("id")==id&&!m.optBoolean("disabled")){val item=JSONObject().put("id",id).put("object","model").put("owned_by","workbuddy").put("created",0).put("name",m.str("name")).put("context_window",m.optLong("maxInputTokens")).put("max_output_tokens",m.optLong("maxOutputTokens")).put("supported_efforts",m.optJSONObject("reasoning")?.optJSONArray("supportedEfforts")?:JSONArray());for(k in listOf("multiplier","rate","倍率","inputMultiplier","outputMultiplier"))if(m.has(k)&&!m.isNull(k))item.put(k,m.get(k));out.put(item);break}}}
+        fun fetch(acc:Account):JSONObject = envelope(base(acc)+modelsPath(acc),"GET",headers(acc))
+        val d=try{fetch(a)}catch(e:RelayError){if(e.status!=401)throw e;a=ready(true);fetch(a)}
+        val all=modelList(d);val agents=agentList(d);val ids=mutableListOf<String>()
+        for(i in 0 until agents.length()){val agent=agents.optJSONObject(i)?:continue;if(agent.str("name")=="cli"){val ms=agent.optJSONArray("models")?:JSONArray();for(j in 0 until ms.length())ms.optString(j).takeIf{it.isNotBlank()}?.let{ids.add(it)};break}}
+        val out=JSONArray();for(id in ids){for(i in 0 until all.length()){val m=all.optJSONObject(i)?:continue;if(m.str("id")==id&&!m.optBoolean("disabled")){val item=JSONObject().put("id",id).put("object","model").put("owned_by","workbuddy").put("created",0).put("name",m.str("name")).put("context_window",m.optLong("maxInputTokens")).put("max_output_tokens",m.optLong("maxOutputTokens")).put("supported_efforts",m.optJSONObject("reasoning")?.optJSONArray("supportedEfforts")?:JSONArray());for(k in listOf("multiplier","rate","倍率","inputMultiplier","outputMultiplier"))if(m.has(k)&&!m.isNull(k))item.put(k,m.get(k));out.put(item);break}}}
         if(out.length()==0)throw RelayError(502,"上游没有可用的 cli 模型")
         Store.saveModels(a,out);return out
     }
+    /** 国际版返回 data.data，国内版返回 data.models。 */
+    private fun modelList(d:JSONObject):JSONArray = d.optJSONArray("models")?:d.optJSONArray("data")?:JSONArray()
+    private fun agentList(d:JSONObject):JSONArray = d.optJSONArray("agents")?:d.optJSONArray("agent_list")?:JSONArray()
     fun chat(body:JSONObject):HttpURLConnection {
         var a=ready();var c=open(base(a)+"/v2/chat/completions","POST",headers(a),body.toString())
         if(c.responseCode==401){c.disconnect();a=ready(true);c=open(base(a)+"/v2/chat/completions","POST",headers(a),body.toString())}
